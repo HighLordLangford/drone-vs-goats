@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Drone vs Goats</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; background: #111;
+    font-family: 'Segoe UI', Arial, sans-serif; overflow: hidden;
+    user-select: none;
+  }
+  #wrap { position: relative; width: 100%; height: 100vh; display: flex; align-items: center; justify-content: center; }
+  canvas { background: #7ec8e3; cursor: crosshair; box-shadow: 0 0 40px rgba(0,0,0,0.6); }
+  .overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    background: rgba(0,0,0,0.55); color: white; gap: 16px;
+  }
+  .overlay h1 { font-size: 2.4em; margin: 0; text-shadow: 2px 2px 4px #000; }
+  .overlay p { max-width: 480px; line-height: 1.4; margin: 0; }
+  .overlay button {
+    padding: 12px 28px; font-size: 1.1em; border: none; border-radius: 8px;
+    background: #ffb703; color: #222; font-weight: bold; cursor: pointer;
+  }
+  .overlay button:hover { background: #ffc93c; }
+  #hud {
+    position: absolute; top: 10px; left: 10px; right: 10px; color: white;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    font-weight: bold; text-shadow: 1px 1px 3px #000; pointer-events: none;
+  }
+  #bossBarWrap {
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    width: 300px; height: 18px; background: rgba(0,0,0,0.4); border: 2px solid white;
+    border-radius: 4px; overflow: hidden; display: none;
+  }
+  #bossBar { height: 100%; width: 100%; background: #d62828; transition: width 0.15s; }
+  #bossLabel {
+    position: absolute; top: 30px; left: 50%; transform: translateX(-50%);
+    color: white; font-weight: bold; text-shadow: 1px 1px 3px #000; display: none;
+  }
+  #bossTimerWrap {
+    position: absolute; top: 52px; left: 50%; transform: translateX(-50%);
+    color: white; font-weight: bold; text-shadow: 1px 1px 3px #000; display: none;
+  }
+  #bossTimerWrap.urgent { color: #ff4d4d; animation: pulseUrgent 0.5s infinite; }
+  @keyframes pulseUrgent {
+    0%,100% { transform: translateX(-50%) scale(1); }
+    50% { transform: translateX(-50%) scale(1.18); }
+  }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="900" height="520"></canvas>
+
+  <div id="hud">
+    <div>Score: <span id="score">0</span></div>
+    <div>Crops: <span id="crops">❤❤❤❤❤</span></div>
+  </div>
+  <div id="bossBarWrap"><div id="bossBar"></div></div>
+  <div id="bossLabel">RAM BOSS</div>
+  <div id="bossTimerWrap">Take him down: <span id="bossTimer">0</span>s</div>
+
+  <div class="overlay" id="startScreen">
+    <h1>🚁 Drone vs Goats 🐐</h1>
+    <p>Goats are raiding the farm! Aim your drone and click to launch missiles
+       at them before they reach the crops. Rack up hits and a giant Ram boss
+       will show up for the final showdown. Don't let the crops run out!</p>
+    <button id="startBtn">Start Game</button>
+  </div>
+
+  <div class="overlay hidden" id="winScreen">
+    <h1>🏆 Ram Defeated!</h1>
+    <p>The farm is safe. Final score: <span id="winScore">0</span></p>
+    <button id="restartBtnWin">Play Again</button>
+  </div>
+
+  <div class="overlay hidden" id="loseScreen">
+    <h1 id="loseTitle">The Crops Are Gone</h1>
+    <p id="loseReason">The goats ate everything.</p>
+    <p>Final score: <span id="loseScore">0</span></p>
+    <button id="restartBtnLose">Try Again</button>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const GROUND_Y = H - 90;
+const BOSS_GOAL = 15;       // goats to defeat before the boss appears
+const BOSS_HEALTH_MAX = 8;
+const CROPS_MAX = 5;
+const BOSS_TIME_LIMIT = 22;      // seconds to kill the Ram before he charges the farmer
+const HORN_BLAST_MIN_GAP = 1.4;
+const HORN_BLAST_MAX_GAP = 2.3;
+const HORN_BLAST_WINDUP = 0.35;  // horns glow this long before firing
+const HORN_BLAST_SPEED = 260;
+const CHARGE_SPEED = 420;
+
+let state = 'start';        // start | playing | bossIntro | boss | win | lose
+let score = 0;
+let crops = CROPS_MAX;
+let goats = [];
+let missiles = [];
+let particles = [];
+let spawnTimer = 0;
+let boss = null;
+let hornBlasts = [];
+let bossTimer = 0;
+let mouse = { x: W/2, y: 60 };
+let farmerBob = 0;
+let farmerX = 200;
+let farmerY = GROUND_Y - 4;
+let farmerJitter = 0;
+let propellerAngle = 0;
+
+function resetGame() {
+  score = 0; crops = CROPS_MAX; goats = []; missiles = []; particles = [];
+  spawnTimer = 0; boss = null; hornBlasts = []; bossTimer = 0;
+  farmerX = 200; farmerJitter = 0;
+  updateHUD();
+  document.getElementById('bossBarWrap').style.display = 'none';
+  document.getElementById('bossLabel').style.display = 'none';
+  document.getElementById('bossTimerWrap').style.display = 'none';
+}
+
+function updateHUD() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('crops').textContent = '❤'.repeat(Math.max(crops,0)) + '♡'.repeat(CROPS_MAX-Math.max(crops,0));
+}
+
+// ---------- entities ----------
+function spawnGoat() {
+  const lane = GROUND_Y - 10 - Math.random()*70;
+  const baseSpeed = 40 + Math.random()*50;
+  goats.push({
+    x: W + 30,
+    y: lane,
+    r: 18,
+    baseSpeed,
+    speed: baseSpeed,
+    bob: Math.random()*Math.PI*2,
+    alive: true,
+    scared: 0
+  });
+}
+
+function frightenNearbyGoats(x, y, radius) {
+  for (const g of goats) {
+    if (g.alive && Math.hypot(g.x-x, g.y-y) < radius) {
+      g.scared = 1.6;
+    }
+  }
+}
+
+function spawnBoss() {
+  boss = {
+    x: W/2, y: GROUND_Y - 30, r: 55,
+    dir: 1, speed: 70,
+    health: BOSS_HEALTH_MAX,
+    hornTimer: 1.2 + Math.random()*0.6,
+    windup: 0,
+    charging: false,
+    chargeTarget: 0
+  };
+  hornBlasts = [];
+  bossTimer = BOSS_TIME_LIMIT;
+  document.getElementById('bossBarWrap').style.display = 'block';
+  document.getElementById('bossLabel').style.display = 'block';
+  document.getElementById('bossTimerWrap').style.display = 'block';
+  updateBossBar();
+  updateBossTimerUI();
+}
+
+function updateBossBar() {
+  const pct = Math.max(boss.health,0) / BOSS_HEALTH_MAX * 100;
+  document.getElementById('bossBar').style.width = pct + '%';
+}
+
+function updateBossTimerUI() {
+  const wrap = document.getElementById('bossTimerWrap');
+  document.getElementById('bossTimer').textContent = Math.max(0, Math.ceil(bossTimer));
+  wrap.classList.toggle('urgent', bossTimer <= 8);
+}
+
+function fireHornBlast() {
+  const originX = boss.x - boss.r*0.7;
+  const originY = boss.y - boss.r*0.9;
+  const ang = Math.atan2(55 - originY, mouse.x - originX);
+  hornBlasts.push({
+    x: originX, y: originY,
+    vx: Math.cos(ang)*HORN_BLAST_SPEED,
+    vy: Math.sin(ang)*HORN_BLAST_SPEED,
+    r: 10
+  });
+  spawnExplosion(originX, originY, '#ff8c42');
+}
+
+function updateHornBlasts(dt) {
+  for (const hb of hornBlasts) { hb.x += hb.vx*dt; hb.y += hb.vy*dt; }
+  hornBlasts = hornBlasts.filter(hb => {
+    if (hb.x < -40 || hb.x > W+40 || hb.y < -40 || hb.y > H+40) return false;
+    if (Math.hypot(hb.x-mouse.x, hb.y-55) < 22) {
+      crops = Math.max(crops-1, 0);
+      updateHUD();
+      spawnExplosion(hb.x, hb.y, '#ff5252');
+      return false;
+    }
+    return true;
+  });
+}
+
+function updateFarmer(dt) {
+  farmerBob += dt;
+  const nervous = (state === 'bossIntro' || state === 'boss');
+  if (boss && boss.charging) {
+    farmerJitter = Math.sin(farmerBob*30)*4;
+  } else if (nervous) {
+    farmerX += (150 - farmerX) * Math.min(dt*2, 1);
+    farmerJitter = Math.sin(farmerBob*20)*3 + (Math.random()-0.5)*1.4;
+  } else {
+    farmerX += (200 + Math.sin(farmerBob*0.5)*12 - farmerX) * Math.min(dt*6, 1);
+    farmerJitter *= 0.85;
+  }
+}
+
+function startMaul() {
+  if (boss.charging) return;
+  boss.charging = true;
+  boss.chargeTarget = farmerX;
+  document.getElementById('bossTimerWrap').style.display = 'none';
+}
+
+function updateCharge(dt) {
+  const dx = boss.chargeTarget - boss.x;
+  boss.dir = dx >= 0 ? 1 : -1;
+  boss.x += boss.dir * CHARGE_SPEED * dt;
+  if (Math.abs(dx) < 24) {
+    maulFarmer();
+  }
+}
+
+function maulFarmer() {
+  spawnExplosion(farmerX, farmerY-30, '#c9184a');
+  spawnExplosion(farmerX, farmerY-30, '#4a4e69');
+  endLose('mauled');
+}
+
+function spawnExplosion(x, y, color) {
+  for (let i=0; i<14; i++) {
+    const ang = Math.random()*Math.PI*2;
+    const speed = 60 + Math.random()*120;
+    particles.push({
+      x, y, vx: Math.cos(ang)*speed, vy: Math.sin(ang)*speed,
+      life: 0.5, color
+    });
+  }
+}
+
+function fireMissile(tx, ty) {
+  missiles.push({ x: mouse.x, y: 55, tx, ty, t: 0, dur: 0.22 });
+}
+
+// ---------- input ----------
+canvas.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  mouse.x = (e.clientX - rect.left) * (W/rect.width);
+  mouse.y = (e.clientY - rect.top) * (H/rect.height);
+});
+
+canvas.addEventListener('click', e => {
+  if (state !== 'playing' && state !== 'boss') return;
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (W/rect.width);
+  const y = (e.clientY - rect.top) * (H/rect.height);
+  fireMissile(x, y);
+});
+
+document.getElementById('startBtn').onclick = () => {
+  resetGame();
+  document.getElementById('startScreen').classList.add('hidden');
+  state = 'playing';
+};
+document.getElementById('restartBtnWin').onclick = () => {
+  document.getElementById('winScreen').classList.add('hidden');
+  resetGame();
+  document.getElementById('startScreen').classList.remove('hidden');
+  state = 'start';
+};
+document.getElementById('restartBtnLose').onclick = () => {
+  document.getElementById('loseScreen').classList.add('hidden');
+  resetGame();
+  document.getElementById('startScreen').classList.remove('hidden');
+  state = 'start';
+};
+
+// ---------- update ----------
+let lastTime = performance.now();
+function loop(now) {
+  const dt = Math.min((now - lastTime)/1000, 0.05);
+  lastTime = now;
+
+  update(dt);
+  draw();
+
+  requestAnimationFrame(loop);
+}
+
+function update(dt) {
+  propellerAngle += dt*30;
+  updateFarmer(dt);
+
+  if (state === 'playing') {
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) {
+      spawnGoat();
+      spawnTimer = 0.9 + Math.random()*0.9;
+    }
+    for (const g of goats) {
+      if (g.scared > 0) {
+        g.scared -= dt;
+        g.speed = g.baseSpeed * 2.1;
+        g.bob += dt*16;
+      } else {
+        g.speed = g.baseSpeed;
+        g.bob += dt*6;
+      }
+      g.x -= g.speed*dt;
+      if (g.x < 40 && g.alive) {
+        g.alive = false;
+        crops--;
+        updateHUD();
+        spawnExplosion(g.x, g.y, '#8d99ae');
+      }
+    }
+    goats = goats.filter(g => g.alive);
+
+    if (score >= BOSS_GOAL) {
+      goats = [];
+      state = 'bossIntro';
+      spawnBoss();
+      setTimeout(() => { if (state==='bossIntro') state = 'boss'; }, 800);
+    }
+  }
+
+  if (state === 'boss' && boss) {
+    if (!boss.charging) {
+      boss.x += boss.dir * boss.speed * dt;
+      if (boss.x < 120) { boss.x = 120; boss.dir = 1; }
+      if (boss.x > W-120) { boss.x = W-120; boss.dir = -1; }
+
+      if (boss.windup > 0) {
+        boss.windup -= dt;
+        if (boss.windup <= 0) {
+          fireHornBlast();
+          boss.hornTimer = HORN_BLAST_MIN_GAP + Math.random()*(HORN_BLAST_MAX_GAP-HORN_BLAST_MIN_GAP);
+        }
+      } else {
+        boss.hornTimer -= dt;
+        if (boss.hornTimer <= 0) {
+          boss.windup = HORN_BLAST_WINDUP;
+        }
+      }
+
+      bossTimer -= dt;
+      updateBossTimerUI();
+      if (bossTimer <= 0) startMaul();
+    } else {
+      updateCharge(dt);
+    }
+  }
+
+  updateHornBlasts(dt);
+
+  if ((state === 'playing' || state === 'boss') && crops <= 0) {
+    endLose('crops');
+  }
+
+  for (const m of missiles) m.t += dt;
+  for (const m of missiles) {
+    if (m.t >= m.dur && !m.resolved) {
+      m.resolved = true;
+      resolveHit(m.tx, m.ty);
+    }
+  }
+  missiles = missiles.filter(m => !m.resolved);
+
+  for (const p of particles) {
+    p.x += p.vx*dt; p.y += p.vy*dt; p.vy += 200*dt; p.life -= dt;
+  }
+  particles = particles.filter(p => p.life > 0);
+}
+
+function resolveHit(x, y) {
+  let hit = false;
+  for (const g of goats) {
+    if (g.alive && Math.hypot(g.x-x, g.y-y) < g.r+14) {
+      g.alive = false;
+      hit = true;
+      score++;
+      spawnExplosion(g.x, g.y, '#e63946');
+      frightenNearbyGoats(g.x, g.y, 190);
+    }
+  }
+  if (!hit && boss && (state === 'boss')) {
+    if (Math.hypot(boss.x-x, boss.y-y) < boss.r+10) {
+      boss.health--;
+      updateBossBar();
+      spawnExplosion(x, y, '#e63946');
+      if (boss.health <= 0) {
+        endWin();
+      }
+    }
+  }
+  if (hit) { goats = goats.filter(g => g.alive); updateHUD(); }
+}
+
+function endWin() {
+  state = 'win';
+  document.getElementById('bossTimerWrap').style.display = 'none';
+  document.getElementById('winScore').textContent = score;
+  document.getElementById('winScreen').classList.remove('hidden');
+}
+function endLose(reason) {
+  state = 'lose';
+  document.getElementById('bossTimerWrap').style.display = 'none';
+  document.getElementById('loseScore').textContent = score;
+  if (reason === 'mauled') {
+    document.getElementById('loseTitle').textContent = '🐐💥 Mauled by the Ram!';
+    document.getElementById('loseReason').textContent = "You didn't take him down in time, and he ran you down.";
+  } else {
+    document.getElementById('loseTitle').textContent = 'The Crops Are Gone';
+    document.getElementById('loseReason').textContent = 'The goats ate everything.';
+  }
+  document.getElementById('loseScreen').classList.remove('hidden');
+}
+
+// ---------- draw ----------
+function drawBackground() {
+  const grad = ctx.createLinearGradient(0,0,0,GROUND_Y);
+  grad.addColorStop(0, '#ffb347');
+  grad.addColorStop(0.55, '#ffd9a0');
+  grad.addColorStop(1, '#f6e6c8');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0,0,W,GROUND_Y);
+
+  // sun
+  ctx.fillStyle = '#ff8c42';
+  ctx.beginPath(); ctx.arc(W-80, 70, 34, 0, Math.PI*2); ctx.fill();
+
+  // far desert mountains (rust/mesa tones)
+  ctx.fillStyle = '#c96f4a';
+  ctx.beginPath();
+  ctx.moveTo(0, GROUND_Y-30);
+  ctx.lineTo(60, GROUND_Y-120);
+  ctx.lineTo(140, GROUND_Y-90);
+  ctx.lineTo(230, GROUND_Y-150);
+  ctx.lineTo(330, GROUND_Y-95);
+  ctx.lineTo(430, GROUND_Y-140);
+  ctx.lineTo(540, GROUND_Y-80);
+  ctx.lineTo(650, GROUND_Y-130);
+  ctx.lineTo(760, GROUND_Y-70);
+  ctx.lineTo(W, GROUND_Y-110);
+  ctx.lineTo(W, GROUND_Y); ctx.lineTo(0, GROUND_Y); ctx.closePath(); ctx.fill();
+
+  // nearer sandstone hills
+  ctx.fillStyle = '#deA46b';
+  ctx.beginPath();
+  ctx.moveTo(0, GROUND_Y-20);
+  ctx.quadraticCurveTo(150, GROUND_Y-70, 320, GROUND_Y-25);
+  ctx.quadraticCurveTo(500, GROUND_Y+5, 680, GROUND_Y-35);
+  ctx.quadraticCurveTo(820, GROUND_Y-55, W, GROUND_Y-20);
+  ctx.lineTo(W, GROUND_Y); ctx.lineTo(0, GROUND_Y); ctx.closePath(); ctx.fill();
+
+  // sandy field
+  ctx.fillStyle = '#e3c186';
+  ctx.fillRect(0, GROUND_Y, W, H-GROUND_Y);
+
+  // irrigated crop rows (green strip near the farmhouse)
+  ctx.fillStyle = '#7a9a4a';
+  ctx.fillRect(150, GROUND_Y, W-150, H-GROUND_Y);
+  ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+  for (let i=1;i<10;i++){
+    ctx.beginPath(); ctx.moveTo(150+i*80-20, GROUND_Y); ctx.lineTo(150+i*80+20, H); ctx.stroke();
+  }
+
+  // scattered scrub / small cacti out in the sand
+  drawCactus(400, GROUND_Y+18);
+  drawCactus(760, GROUND_Y+34);
+  drawCactus(60, GROUND_Y+50);
+
+  drawFarmhouse();
+  drawFarmer();
+  drawFence();
+}
+
+function drawCactus(x, y) {
+  ctx.save();
+  ctx.translate(x,y);
+  ctx.fillStyle = '#4f7942';
+  ctx.beginPath(); ctx.roundRect(-4,-30,8,30,4); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(-14,-20,10,6,4); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(4,-24,10,6,4); ctx.fill();
+  ctx.restore();
+}
+
+function drawFarmhouse() {
+  const bx = 60, by = GROUND_Y-60;
+  // flat-roofed adobe house
+  ctx.fillStyle = '#d9b48f';
+  ctx.fillRect(bx, by, 90, 60);
+  ctx.fillStyle = '#b98d5f';
+  ctx.fillRect(bx-6, by-10, 102, 10);
+  ctx.fillStyle = '#8a5a3c';
+  ctx.fillRect(bx+15, by+12, 16, 16);
+  ctx.fillRect(bx+57, by+12, 16, 16);
+  ctx.fillStyle = '#5b3a24';
+  ctx.fillRect(bx+38, by+24, 20, 36);
+  // roof beam ends (vigas) poking out, classic adobe detail
+  ctx.fillStyle = '#7a5a3c';
+  for (let i=0;i<4;i++){
+    ctx.fillRect(bx+8+i*24, by-16, 5, 8);
+  }
+}
+
+function drawFence() {
+  ctx.strokeStyle = '#8d6e4e';
+  ctx.lineWidth = 4;
+  for (let x=170; x<330; x+=35) {
+    ctx.beginPath(); ctx.moveTo(x, GROUND_Y+10); ctx.lineTo(x, GROUND_Y-20); ctx.stroke();
+  }
+  ctx.beginPath(); ctx.moveTo(170, GROUND_Y-15); ctx.lineTo(330, GROUND_Y-15); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(170, GROUND_Y-2); ctx.lineTo(330, GROUND_Y-2); ctx.stroke();
+}
+
+function drawFarmer() {
+  const nervous = (state === 'bossIntro' || state === 'boss');
+  const fx = farmerX + farmerJitter;
+  const fy = farmerY;
+  const bob = nervous ? Math.sin(farmerBob*10)*1.5 : Math.sin(farmerBob*4)*2;
+  ctx.save();
+  ctx.translate(fx, fy+bob);
+  // sandals peeking from under the robe
+  ctx.fillStyle = '#7a5a3c';
+  ctx.fillRect(-8,-2,7,3); ctx.fillRect(3,-2,7,3);
+  // long robe (loose, ankle-length, practical against sun and blowing sand)
+  ctx.fillStyle = '#f5f1e6';
+  ctx.beginPath();
+  ctx.moveTo(-13, 0);
+  ctx.lineTo(-9, -48);
+  ctx.lineTo(9, -48);
+  ctx.lineTo(13, 0);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.06)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(-3,-40); ctx.lineTo(-6,0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(4,-40); ctx.lineTo(7,0); ctx.stroke();
+  // arms / sleeves
+  ctx.strokeStyle = '#f5f1e6'; ctx.lineWidth = 7; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(-9,-42); ctx.lineTo(-19,-26); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(9,-42); ctx.lineTo(19,-26); ctx.stroke();
+  ctx.fillStyle = '#e6b89c';
+  ctx.beginPath(); ctx.arc(-19,-24,3.5,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(19,-24,3.5,0,Math.PI*2); ctx.fill();
+  // head
+  ctx.fillStyle = '#e6b89c';
+  ctx.beginPath(); ctx.arc(0,-54,9,0,Math.PI*2); ctx.fill();
+  // turban: wrapped cloth for sun and dust protection, with a short tail
+  ctx.fillStyle = '#f5f1e6';
+  ctx.beginPath(); ctx.ellipse(0,-59,11,8,0,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.08)'; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.ellipse(0,-60,9,3,0.15,0,Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(0,-63,7,2.6,0.1,0,Math.PI*2); ctx.stroke();
+  ctx.fillStyle = '#f5f1e6';
+  ctx.beginPath();
+  ctx.moveTo(8,-58); ctx.quadraticCurveTo(20,-52,16,-40); ctx.quadraticCurveTo(13,-50,6,-54);
+  ctx.closePath(); ctx.fill();
+  if (nervous) {
+    // nervous sweat drop
+    ctx.fillStyle = '#7ec8e3';
+    ctx.beginPath();
+    ctx.moveTo(13,-64);
+    ctx.quadraticCurveTo(19,-56,13,-50);
+    ctx.quadraticCurveTo(7,-56,13,-64);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawGoat(g) {
+  const scared = g.scared > 0;
+  const bob = Math.sin(g.bob) * (scared ? 6 : 3);
+  ctx.save();
+  ctx.translate(g.x, g.y+bob);
+  if (scared) { ctx.rotate(Math.sin(g.bob*2)*0.08); }
+  ctx.fillStyle = '#f1faee';
+  ctx.beginPath(); ctx.ellipse(0,0,g.r,g.r*0.7,0,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(-g.r*0.8,-g.r*0.5,g.r*0.5,g.r*0.45,0,0,Math.PI*2); ctx.fill();
+  if (scared) {
+    // wide startled eye
+    ctx.fillStyle = 'white';
+    ctx.beginPath(); ctx.arc(-g.r*0.95,-g.r*0.55,4.5,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#333';
+    ctx.beginPath(); ctx.arc(-g.r*0.95,-g.r*0.55,2.2,0,Math.PI*2); ctx.fill();
+  } else {
+    ctx.fillStyle = '#333';
+    ctx.beginPath(); ctx.arc(-g.r*0.95,-g.r*0.55,2,0,Math.PI*2); ctx.fill();
+  }
+  ctx.strokeStyle = '#ccc'; ctx.lineWidth=4;
+  ctx.beginPath(); ctx.moveTo(-g.r*0.6,g.r*0.6); ctx.lineTo(-g.r*0.6,g.r*1.1); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(g.r*0.4,g.r*0.6); ctx.lineTo(g.r*0.4,g.r*1.1); ctx.stroke();
+  ctx.restore();
+
+  if (scared) {
+    ctx.save();
+    ctx.fillStyle = '#ffb703';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('!', g.x, g.y + bob - g.r*1.6);
+    ctx.restore();
+  }
+}
+
+function drawBoss(b) {
+  ctx.save();
+  ctx.translate(b.x, b.y);
+
+  if (b.charging) {
+    // motion streaks trailing the charge
+    ctx.strokeStyle = 'rgba(74,78,105,0.5)'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+    for (let i=1;i<=3;i++) {
+      ctx.beginPath();
+      ctx.moveTo(b.r*0.8*-b.dir*i*0.6, -b.r*0.2+i*6);
+      ctx.lineTo(b.r*1.6*-b.dir*i*0.6, -b.r*0.2+i*6);
+      ctx.stroke();
+    }
+  }
+
+  ctx.fillStyle = '#4a4e69';
+  ctx.beginPath(); ctx.ellipse(0,0,b.r,b.r*0.65,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#5c5f77';
+  ctx.beginPath(); ctx.ellipse(-b.r*0.75,-b.r*0.35,b.r*0.45,b.r*0.4,0,0,Math.PI*2); ctx.fill();
+
+  // horns, glowing hot right before a blast fires
+  const winding = b.windup > 0;
+  const glow = winding ? 0.5 + 0.5*(1 - b.windup/HORN_BLAST_WINDUP) : 0;
+  ctx.strokeStyle = winding ? `rgba(255,${Math.round(216-100*glow)},${Math.round(195-150*glow)},1)` : '#e0d8c3';
+  ctx.lineWidth = 9; ctx.lineCap='round';
+  if (winding) { ctx.shadowColor = '#ff5a1f'; ctx.shadowBlur = 10+10*glow; }
+  ctx.beginPath(); ctx.moveTo(-b.r*0.9,-b.r*0.55); ctx.quadraticCurveTo(-b.r*1.5,-b.r*0.2,-b.r*1.2,b.r*0.3); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-b.r*0.6,-b.r*0.65); ctx.quadraticCurveTo(-b.r*0.9,-b.r*1.1,-b.r*0.4,-b.r*1.15); ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // menacing glowing eye — brighter when winding up, fierce red mid-charge
+  const eyePulse = b.charging ? 1 : (winding ? glow : 0.35+0.25*Math.sin(performance.now()*0.006));
+  ctx.fillStyle = `rgba(255,${Math.round(60-40*eyePulse)},${Math.round(60-40*eyePulse)},1)`;
+  ctx.shadowColor = '#ff1c1c'; ctx.shadowBlur = 4+8*eyePulse;
+  ctx.beginPath(); ctx.arc(-b.r*0.9,-b.r*0.4,4,0,Math.PI*2); ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // legs
+  ctx.strokeStyle = '#3a3d52'; ctx.lineWidth=10;
+  ctx.beginPath(); ctx.moveTo(-b.r*0.4,b.r*0.5); ctx.lineTo(-b.r*0.4,b.r*0.9); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(b.r*0.4,b.r*0.5); ctx.lineTo(b.r*0.4,b.r*0.9); ctx.stroke();
+  ctx.restore();
+}
+
+function drawHornBlasts() {
+  for (const hb of hornBlasts) {
+    ctx.save();
+    ctx.translate(hb.x, hb.y);
+    ctx.rotate(Math.atan2(hb.vy, hb.vx));
+    const grad = ctx.createRadialGradient(0,0,0,0,0,hb.r*1.6);
+    grad.addColorStop(0, '#fff3c4');
+    grad.addColorStop(0.5, '#ff8c42');
+    grad.addColorStop(1, 'rgba(255,90,30,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.ellipse(0,0,hb.r*1.6,hb.r,0,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawDrone() {
+  const dx = mouse.x, dy = 55;
+  const pulse = (Math.sin(propellerAngle*2)+1)/2; // 0..1 glow pulse
+
+  // faint targeting laser down to the crosshair
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,80,80,0.35)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6,6]);
+  ctx.beginPath(); ctx.moveTo(dx, dy+10); ctx.lineTo(mouse.x, mouse.y); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+
+  ctx.save();
+  ctx.translate(dx, dy);
+
+  // engine glow trails behind the wingtips
+  for (const sx of [-1,1]) {
+    ctx.save();
+    ctx.fillStyle = `rgba(80,200,255,${0.35+0.35*pulse})`;
+    ctx.beginPath();
+    ctx.ellipse(sx*30, 6, 8+3*pulse, 4, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // swept wings (angular, stealth-style)
+  ctx.fillStyle = '#1c1f26';
+  ctx.beginPath();
+  ctx.moveTo(-6,-2); ctx.lineTo(-34,8); ctx.lineTo(-30,12); ctx.lineTo(-4,4);
+  ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(6,-2); ctx.lineTo(34,8); ctx.lineTo(30,12); ctx.lineTo(4,4);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = `rgba(80,200,255,${0.5+0.5*pulse})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(-34,8); ctx.lineTo(-30,12); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(34,8); ctx.lineTo(30,12); ctx.stroke();
+
+  // angular fuselage (diamond body)
+  const grad = ctx.createLinearGradient(0,-14,0,14);
+  grad.addColorStop(0, '#3a3f4b');
+  grad.addColorStop(1, '#14161c');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(0,-12);
+  ctx.lineTo(14,-2);
+  ctx.lineTo(9,10);
+  ctx.lineTo(0,14);
+  ctx.lineTo(-9,10);
+  ctx.lineTo(-14,-2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(150,180,210,0.4)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // top fin
+  ctx.fillStyle = '#20232b';
+  ctx.beginPath(); ctx.moveTo(-3,-10); ctx.lineTo(0,-20); ctx.lineTo(3,-10); ctx.closePath(); ctx.fill();
+
+  // glowing sensor pod underneath, aimed toward the crosshair
+  const aim = Math.atan2(mouse.y-(dy+10), mouse.x-dx) * 0.15; // subtle tilt
+  ctx.save();
+  ctx.rotate(aim);
+  ctx.fillStyle = '#0a0c10';
+  ctx.beginPath(); ctx.arc(0,10,5,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = `rgba(255,60,60,${0.7+0.3*pulse})`;
+  ctx.shadowColor = '#ff3c3c';
+  ctx.shadowBlur = 8;
+  ctx.beginPath(); ctx.arc(0,10,2.3,0,Math.PI*2); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.restore();
+
+  ctx.restore();
+
+  // crosshair
+  ctx.strokeStyle = 'rgba(80,220,255,0.9)'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.arc(mouse.x, mouse.y, 14, 0, Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(mouse.x-20,mouse.y); ctx.lineTo(mouse.x-8,mouse.y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(mouse.x+8,mouse.y); ctx.lineTo(mouse.x+20,mouse.y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(mouse.x,mouse.y-20); ctx.lineTo(mouse.x,mouse.y-8); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(mouse.x,mouse.y+8); ctx.lineTo(mouse.x,mouse.y+20); ctx.stroke();
+}
+
+function drawMissiles() {
+  for (const m of missiles) {
+    const p = Math.min(m.t/m.dur, 1);
+    const x = mouse.x*(1-p) + m.tx*p; // approx, drone may have moved but fine visually
+    const y = 55*(1-p) + m.ty*p;
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.rotate(Math.atan2(m.ty-55, m.tx-mouse.x));
+    ctx.fillStyle = '#ffb703';
+    ctx.beginPath(); ctx.moveTo(10,0); ctx.lineTo(-8,-4); ctx.lineTo(-8,4); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(p.life,0)/0.5;
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x,p.y,4,0,Math.PI*2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+function draw() {
+  drawBackground();
+  for (const g of goats) drawGoat(g);
+  if (boss && (state==='boss' || state==='bossIntro')) drawBoss(boss);
+  drawHornBlasts();
+  drawParticles();
+  drawMissiles();
+  drawDrone();
+
+  if (state === 'bossIntro') {
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.fillRect(0,H/2-40,W,80);
+    ctx.fillStyle = 'white';
+    ctx.font = 'bold 32px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('THE RAM APPROACHES!', W/2, H/2+10);
+  }
+
+  if (boss && boss.charging) {
+    ctx.fillStyle = 'rgba(198,24,42,0.35)';
+    ctx.fillRect(0,H/2-40,W,80);
+    ctx.fillStyle = 'white';
+    ctx.font = 'bold 32px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('HE\'S CHARGING THE FARMER!', W/2, H/2+10);
+  }
+}
+
+updateHUD();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
