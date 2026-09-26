@@ -91,12 +91,14 @@ const W = canvas.width, H = canvas.height;
 
 const GROUND_Y = H - 90;
 const BOSS_GOAL = 15;       // goats to defeat before the boss appears
-const BOSS_HEALTH_MAX = 8;
+const BOSS_HEALTH_MAX = 18;
+const BLACK_GOAT_CHANCE = 0.2;
 const CROPS_MAX = 5;
-const BOSS_TIME_LIMIT = 22;      // seconds to kill the Ram before he charges the farmer
-const HORN_BLAST_MIN_GAP = 1.4;
-const HORN_BLAST_MAX_GAP = 2.3;
-const HORN_BLAST_WINDUP = 0.35;  // horns glow this long before firing
+const BOSS_TIME_LIMIT = 17;      // seconds to kill the Ram before he charges the farmer
+const ENRAGE_WINDUP = 0.6;      // he bleats this long before the enrage charge
+const HORN_BLAST_MIN_GAP = 0.533;
+const HORN_BLAST_MAX_GAP = 0.867;
+const HORN_BLAST_WINDUP = 0.3;  // horns glow this long before firing
 const HORN_BLAST_SPEED = 260;
 const CHARGE_SPEED = 420;
 
@@ -136,6 +138,7 @@ function updateHUD() {
 function spawnGoat() {
   const lane = GROUND_Y - 10 - Math.random()*70;
   const baseSpeed = 40 + Math.random()*50;
+  const black = Math.random() < BLACK_GOAT_CHANCE;
   goats.push({
     x: W + 30,
     y: lane,
@@ -144,7 +147,9 @@ function spawnGoat() {
     speed: baseSpeed,
     bob: Math.random()*Math.PI*2,
     alive: true,
-    scared: 0
+    scared: 0,
+    black,
+    hp: black ? 2 : 1
   });
 }
 
@@ -161,10 +166,14 @@ function spawnBoss() {
     x: W/2, y: GROUND_Y - 30, r: 55,
     dir: 1, speed: 70,
     health: BOSS_HEALTH_MAX,
-    hornTimer: 1.2 + Math.random()*0.6,
+    hornTimer: 0.7 + Math.random()*0.3,
     windup: 0,
     charging: false,
-    chargeTarget: 0
+    chargeTarget: 0,
+    enraged: false,
+    enraging: false,
+    enrageTimer: 0,
+    bleatTimer: 0
   };
   hornBlasts = [];
   bossTimer = BOSS_TIME_LIMIT;
@@ -186,9 +195,15 @@ function updateBossTimerUI() {
   wrap.classList.toggle('urgent', bossTimer <= 8);
 }
 
-function fireHornBlast() {
-  const originX = boss.x - boss.r*0.7;
-  const originY = boss.y - boss.r*0.9;
+const HORN_ORIGIN_OFFSETS = [
+  { x: -0.7, y: -0.9 },
+  { x: -0.5, y: -0.95 }
+];
+
+function fireHornBlast(hornIndex = 0) {
+  const off = HORN_ORIGIN_OFFSETS[hornIndex];
+  const originX = boss.x + boss.r*off.x;
+  const originY = boss.y + boss.r*off.y;
   const ang = Math.atan2(55 - originY, mouse.x - originX);
   hornBlasts.push({
     x: originX, y: originY,
@@ -232,6 +247,25 @@ function startMaul() {
   boss.charging = true;
   boss.chargeTarget = farmerX;
   document.getElementById('bossTimerWrap').style.display = 'none';
+}
+
+function bleatLoudly() {
+  if (typeof speechSynthesis === 'undefined') return;
+  speechSynthesis.cancel();
+  const utter = new SpeechSynthesisUtterance('BAAAAAAA');
+  utter.volume = 1;
+  utter.rate = 0.6;
+  utter.pitch = 0.2;
+  speechSynthesis.speak(utter);
+}
+
+function triggerEnrage() {
+  boss.enraged = true;
+  boss.enraging = true;
+  boss.enrageTimer = ENRAGE_WINDUP;
+  boss.bleatTimer = 1.1;
+  boss.windup = 0;
+  bleatLoudly();
 }
 
 function updateCharge(dt) {
@@ -342,12 +376,18 @@ function update(dt) {
       goats = [];
       state = 'bossIntro';
       spawnBoss();
-      setTimeout(() => { if (state==='bossIntro') state = 'boss'; }, 800);
+      setTimeout(() => { if (state==='bossIntro') state = 'boss'; }, 400);
     }
   }
 
   if (state === 'boss' && boss) {
-    if (!boss.charging) {
+    if (boss.enraging) {
+      boss.enrageTimer -= dt;
+      if (boss.enrageTimer <= 0) {
+        boss.enraging = false;
+        startMaul();
+      }
+    } else if (!boss.charging) {
       boss.x += boss.dir * boss.speed * dt;
       if (boss.x < 120) { boss.x = 120; boss.dir = 1; }
       if (boss.x > W-120) { boss.x = W-120; boss.dir = -1; }
@@ -355,7 +395,8 @@ function update(dt) {
       if (boss.windup > 0) {
         boss.windup -= dt;
         if (boss.windup <= 0) {
-          fireHornBlast();
+          fireHornBlast(0);
+          if (Math.random() < 0.25) fireHornBlast(1);
           boss.hornTimer = HORN_BLAST_MIN_GAP + Math.random()*(HORN_BLAST_MAX_GAP-HORN_BLAST_MIN_GAP);
         }
       } else {
@@ -371,6 +412,8 @@ function update(dt) {
     } else {
       updateCharge(dt);
     }
+
+    if (boss.bleatTimer > 0) boss.bleatTimer -= dt;
   }
 
   updateHornBlasts(dt);
@@ -398,11 +441,16 @@ function resolveHit(x, y) {
   let hit = false;
   for (const g of goats) {
     if (g.alive && Math.hypot(g.x-x, g.y-y) < g.r+14) {
-      g.alive = false;
+      g.hp--;
       hit = true;
-      score++;
       spawnExplosion(g.x, g.y, '#e63946');
-      frightenNearbyGoats(g.x, g.y, 190);
+      if (g.hp <= 0) {
+        g.alive = false;
+        score++;
+        frightenNearbyGoats(g.x, g.y, 190);
+      } else {
+        g.scared = 1.6;
+      }
     }
   }
   if (!hit && boss && (state === 'boss')) {
@@ -410,7 +458,9 @@ function resolveHit(x, y) {
       boss.health--;
       updateBossBar();
       spawnExplosion(x, y, '#e63946');
-      if (boss.health <= 0) {
+      if (boss.health === 1 && !boss.enraged) {
+        triggerEnrage();
+      } else if (boss.health <= 0) {
         endWin();
       }
     }
@@ -595,7 +645,7 @@ function drawGoat(g) {
   ctx.save();
   ctx.translate(g.x, g.y+bob);
   if (scared) { ctx.rotate(Math.sin(g.bob*2)*0.08); }
-  ctx.fillStyle = '#f1faee';
+  ctx.fillStyle = g.black ? '#1a1a1a' : '#f1faee';
   ctx.beginPath(); ctx.ellipse(0,0,g.r,g.r*0.7,0,0,Math.PI*2); ctx.fill();
   ctx.beginPath(); ctx.ellipse(-g.r*0.8,-g.r*0.5,g.r*0.5,g.r*0.45,0,0,Math.PI*2); ctx.fill();
   if (scared) {
@@ -605,12 +655,16 @@ function drawGoat(g) {
     ctx.fillStyle = '#333';
     ctx.beginPath(); ctx.arc(-g.r*0.95,-g.r*0.55,2.2,0,Math.PI*2); ctx.fill();
   } else {
-    ctx.fillStyle = '#333';
+    ctx.fillStyle = g.black ? '#eee' : '#333';
     ctx.beginPath(); ctx.arc(-g.r*0.95,-g.r*0.55,2,0,Math.PI*2); ctx.fill();
   }
-  ctx.strokeStyle = '#ccc'; ctx.lineWidth=4;
+  ctx.strokeStyle = g.black ? '#666' : '#ccc'; ctx.lineWidth=4;
   ctx.beginPath(); ctx.moveTo(-g.r*0.6,g.r*0.6); ctx.lineTo(-g.r*0.6,g.r*1.1); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(g.r*0.4,g.r*0.6); ctx.lineTo(g.r*0.4,g.r*1.1); ctx.stroke();
+  if (g.black && g.hp === 1) {
+    ctx.strokeStyle = '#e63946'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-g.r*0.3,-g.r*0.3); ctx.lineTo(g.r*0.2,g.r*0.25); ctx.stroke();
+  }
   ctx.restore();
 
   if (scared) {
@@ -665,6 +719,19 @@ function drawBoss(b) {
   ctx.beginPath(); ctx.moveTo(-b.r*0.4,b.r*0.5); ctx.lineTo(-b.r*0.4,b.r*0.9); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(b.r*0.4,b.r*0.5); ctx.lineTo(b.r*0.4,b.r*0.9); ctx.stroke();
   ctx.restore();
+
+  if (b.bleatTimer > 0) {
+    ctx.save();
+    const bounce = Math.sin(b.bleatTimer*24)*3;
+    ctx.font = 'bold 26px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#000';
+    ctx.fillStyle = '#fff3c4';
+    ctx.strokeText('BAAAAAAA!!!', b.x, b.y - b.r*1.5 + bounce);
+    ctx.fillText('BAAAAAAA!!!', b.x, b.y - b.r*1.5 + bounce);
+    ctx.restore();
+  }
 }
 
 function drawHornBlasts() {
